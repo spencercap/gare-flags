@@ -45,13 +45,14 @@ let pointLightHelper: THREE.PointLightHelper
 let gridHelper: THREE.GridHelper
 
 // Cloth simulation parameters
-const clothWidth = 1
-const clothHeight = 1
+let clothWidth = 1
+let clothHeight = 1
 const clothNumSegmentsX = 12
 const clothNumSegmentsY = 12
+const baseSize = 1 // Base dimension for fitting
 // Box dimensions (width x height x depth)
 const boxWidth = 0.8
-const boxHeight = 0.4
+const boxHeight = 0.8
 const boxDepth = 0.05
 
 let vertexPositionBuffer: any,
@@ -73,11 +74,21 @@ let dampeningUniform: any,
 let vertexWireframeObject: THREE.Mesh,
   springWireframeObject: THREE.Line
 let clothMesh: THREE.Mesh, clothMaterial: any, box: THREE.Mesh, anchorBox: THREE.Mesh
+let clothTexture: THREE.Texture | null = null
+let textureAspectRatio = 1
 let timeSinceLastStep = 0
 let timestamp = 0
 const verletVertices: any[] = []
 const verletSprings: any[] = []
 const verletVertexColumns: any[] = []
+
+// Available poster images
+const availablePosters = {
+  'Poster 1': '/posters/gare-poster-1.jpg',
+  'Poster 2': '/posters/gare-poster-2.jpg',
+  'Poster 3': '/posters/gare-poster-3.jpg',
+  'circuito': '/posters/circuito.png',
+}
 
 const params = {
   wireframe: false,
@@ -87,6 +98,11 @@ const params = {
   anchorZ: 0, // Z position of the anchor box
   dampening: 0.95, // Energy loss per frame (lower = more damped/heavy feeling)
   gravity: 0.0002, // Gravity strength (higher = heavier cloth)
+  useTexture: true, // Use image texture instead of solid color
+  fitMode: 'width', // 'width' or 'height' - which dimension to fit
+  useColorTint: false, // Apply color tinting to texture
+  opacity: 1.0, // Cloth opacity (0 = transparent, 1 = opaque)
+  selectedPoster: 'Poster 1', // Currently selected poster
 }
 
 const API = {
@@ -100,9 +116,35 @@ if (WebGPU.isAvailable() === false) {
   throw new Error('No WebGPU support')
 }
 
+/**
+ * Calculate cloth dimensions based on texture aspect ratio and fit mode
+ */
+function calculateClothDimensions() {
+  if (params.fitMode === 'width') {
+    // Fit to width, adjust height based on aspect ratio
+    clothWidth = baseSize
+    clothHeight = baseSize / textureAspectRatio
+  } else {
+    // Fit to height, adjust width based on aspect ratio
+    clothHeight = baseSize
+    clothWidth = baseSize * textureAspectRatio
+  }
+}
+
+
 init()
 
 async function init() {
+  // ===== 📋 LOAD SAVED SETTINGS =====
+  {
+    // Load saved poster selection from localStorage
+    const savedPoster = localStorage.getItem('selectedPoster')
+    if (savedPoster && availablePosters[savedPoster as keyof typeof availablePosters]) {
+      params.selectedPoster = savedPoster
+      console.log(`Loading saved poster: ${savedPoster}`)
+    }
+  }
+
   // ===== 🖼️ CANVAS, RENDERER, & SCENE =====
   {
     canvas = document.querySelector(`canvas#${CANVAS_ID}`)!
@@ -115,13 +157,29 @@ async function init() {
     scene.background = new THREE.Color(0x1a1a1a)
   }
 
+  // ===== 🖼️ LOAD TEXTURE =====
+  {
+    const textureLoader = new THREE.TextureLoader()
+    const posterPath = availablePosters[params.selectedPoster as keyof typeof availablePosters]
+    clothTexture = await textureLoader.loadAsync(posterPath)
+    clothTexture.colorSpace = THREE.SRGBColorSpace
+    
+    // Calculate aspect ratio from loaded image
+    if (clothTexture.image) {
+      textureAspectRatio = clothTexture.image.width / clothTexture.image.height
+      calculateClothDimensions()
+      console.log(`Texture loaded: ${params.selectedPoster} (${clothTexture.image.width}x${clothTexture.image.height})`)
+      console.log(`Aspect ratio: ${textureAspectRatio.toFixed(2)}, Cloth dimensions: ${clothWidth.toFixed(2)}x${clothHeight.toFixed(2)}`)
+    }
+  }
+
   // ===== 💡 LIGHTS =====
   {
     ambientLight = new THREE.AmbientLight('white', 0.4)
     scene.add(ambientLight)
 
     pointLight = new THREE.PointLight('white', 20, 100)
-    pointLight.position.set(-2, 2, 2)
+    pointLight.position.set(-2, 2, -2)
     pointLight.castShadow = true
     pointLight.shadow.radius = 4
     pointLight.shadow.camera.near = 0.1
@@ -206,7 +264,7 @@ async function init() {
     dragControls.addEventListener('dragend', () => {
       cameraControls.enabled = true
     })
-    dragControls.enabled = true
+    dragControls.enabled = false
   }
 
   // ==== 🐞 DEBUG GUI ====
@@ -228,11 +286,49 @@ async function init() {
 
     // Cloth Material Folder
     const materialFolder = gui.addFolder('Cloth Material')
+    
+    materialFolder.add(params, 'selectedPoster', Object.keys(availablePosters))
+      .name('poster image')
+      .onChange(async (posterName: string) => {
+        // Save selection to localStorage
+        localStorage.setItem('selectedPoster', posterName)
+        // Reload page to apply new aspect ratio
+        console.log(`Switching to ${posterName}... Reloading to apply aspect ratio.`)
+        window.location.reload()
+      })
+    
+    materialFolder.add(params, 'useTexture').name('use texture').onChange((value: boolean) => {
+      clothMaterial.map = value ? clothTexture : null
+      // Update color based on texture and tint settings
+      const newColor = (value && !params.useColorTint) ? 0xffffff : API.color
+      clothMaterial.color.setHex(newColor)
+      clothMaterial.needsUpdate = true
+    })
+    
+    materialFolder.add(params, 'useColorTint').name('color tint').onChange((value: boolean) => {
+      // Update color based on tint setting
+      const newColor = (params.useTexture && !value) ? 0xffffff : API.color
+      clothMaterial.color.setHex(newColor)
+      clothMaterial.needsUpdate = true
+    })
+    
+    materialFolder.add(params, 'fitMode', ['width', 'height']).name('fit mode').onChange(() => {
+      // Note: Changing fit mode requires recreating the cloth
+      console.log('Fit mode changed. Reload the page to see changes.')
+    })
+    
     materialFolder
       .addColor(API, 'color')
       .onChange((color: number) => {
-        clothMaterial.color.setHex(color)
+        // Only apply color if not using texture, or if color tint is enabled
+        if (!params.useTexture || params.useColorTint) {
+          clothMaterial.color.setHex(color)
+        }
       })
+    materialFolder.add(params, 'opacity', 0.0, 1.0, 0.01).name('opacity').onChange((value: number) => {
+      clothMaterial.opacity = value
+      clothMaterial.needsUpdate = true
+    })
     materialFolder.add(clothMaterial, 'roughness', 0.0, 1, 0.01)
     materialFolder.add(clothMaterial, 'sheen', 0.0, 1, 0.01)
     materialFolder.add(clothMaterial, 'sheenRoughness', 0.0, 1, 0.01)
@@ -580,7 +676,7 @@ function setupComputeShaders() {
     
     // Smooth repulsion force (similar to sphere collision)
     // Force increases as vertex gets closer to box
-    const repulsionRadius = float(0.3) // Repulsion starts this distance from box surface
+    const repulsionRadius = float(0.4) // Repulsion starts this distance from box surface
     const penetration = repulsionRadius.sub(dist).max(0)
     
     const boxForceDir = float(0).toVar()
@@ -588,7 +684,8 @@ function setupComputeShaders() {
     boxForceDir.y = diffY.div(dist)
     boxForceDir.z = diffZ.div(dist)
     
-    const boxForce = boxForceDir.mul(penetration).mul(0.001).mul(boxUniform)
+    // Increased force multiplier for more dramatic interaction with heavy cloth
+    const boxForce = boxForceDir.mul(penetration).mul(0.01).mul(boxUniform)
     force.addAssign(boxForce)
 
     // Update the force and position buffers
@@ -718,15 +815,37 @@ function setupClothMesh() {
     3,
     false
   )
+  
+  // Create UV coordinates for texture mapping
+  const uvArray = new Float32Array(vertexCount * 2)
+  for (let x = 0; x < clothNumSegmentsX; x++) {
+    for (let y = 0; y < clothNumSegmentsY; y++) {
+      const index = getIndex(x, y)
+      // Map UVs from 0 to 1 across the cloth
+      // U coordinate: flip horizontally (1 to 0)
+      uvArray[index * 2] = 1 - (x / (clothNumSegmentsX - 1))
+      // V coordinate: flip to show image right-side up (1 to 0)
+      uvArray[index * 2 + 1] = 1 - (y / (clothNumSegmentsY - 1))
+    }
+  }
+  const uvBuffer = new THREE.BufferAttribute(uvArray, 2, false)
+  
   geometry.setAttribute('position', positionBuffer)
   geometry.setAttribute('vertexIds', verletVertexIdBuffer)
+  geometry.setAttribute('uv', uvBuffer)
   geometry.setIndex(indices)
 
+  // Set color to white if using texture without tinting, otherwise use API color
+  const materialColor = (params.useTexture && !params.useColorTint) 
+    ? 0xffffff 
+    : API.color
+  
   clothMaterial = new THREE.MeshPhysicalNodeMaterial({
-    color: new THREE.Color().setHex(API.color),
+    color: new THREE.Color().setHex(materialColor),
+    map: params.useTexture ? clothTexture : null,
     side: THREE.DoubleSide,
     transparent: true,
-    opacity: 0.85,
+    opacity: params.opacity,
     sheen: 1.0,
     sheenRoughness: 0.5,
     sheenColor: new THREE.Color().setHex(API.sheenColor),
@@ -780,7 +899,12 @@ function onWindowResize() {
 }
 
 function updateBox() {
-  box.position.set(Math.sin(timestamp * 2.1) * 0.1, 0, Math.sin(timestamp * 0.8))
+  // Simple back and forth motion along Z axis, positioned lower
+  box.position.set(
+    0, 
+    (-boxHeight / 2) - 0.1, // Move down by half the box height
+    Math.sin(timestamp * 0.8) * 0.5 // Back and forth along Z
+  )
   boxPositionUniform.value.copy(box.position)
 }
 
