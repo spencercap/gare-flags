@@ -17,15 +17,39 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      
       - name: Install dependencies
-        run: npm install
+        run: pnpm install
+      
       - name: Configure vite
         run: |
-          echo 'export default {
-            base: "/${{ github.event.repository.name }}/"
-          }' > vite.config.js
+          echo 'import { defineConfig } from "vite"
+          export default defineConfig({
+            base: "/${{ github.event.repository.name }}/",
+            build: {
+              target: "esnext",
+            },
+            optimizeDeps: {
+              esbuildOptions: {
+                target: "esnext",
+              },
+            },
+          })' > vite.config.ts
+      
       - name: Build project
-        run: npm run build
+        run: pnpm build
+      
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
