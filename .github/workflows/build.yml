@@ -29,20 +29,5 @@ jobs:
       - name: Install dependencies
         run: pnpm install
       
-      - name: Configure vite
-        run: |
-          echo 'import { defineConfig } from "vite"
-          export default defineConfig({
-            base: "/${{github.event.repository.name}}/",
-            build: {
-              target: "esnext",
-            },
-            optimizeDeps: {
-              esbuildOptions: {
-                target: "esnext",
-              },
-            },
-          })' > vite.config.ts
-      
       - name: Build project
         run: pnpm build

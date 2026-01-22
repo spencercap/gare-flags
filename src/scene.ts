@@ -83,11 +83,12 @@ const verletSprings: any[] = []
 const verletVertexColumns: any[] = []
 
 // Available poster images
+// Using import.meta.env.BASE_URL to handle both dev and production paths
 const availablePosters = {
-  'Poster 1': '/posters/gare-poster-1.jpg',
-  'Poster 2': '/posters/gare-poster-2.jpg',
-  'Poster 3': '/posters/gare-poster-3.jpg',
-  'circuito': '/posters/circuito.png',
+  'Poster 1': `${import.meta.env.BASE_URL}posters/gare-poster-1.jpg`,
+  'Poster 2': `${import.meta.env.BASE_URL}posters/gare-poster-2.jpg`,
+  'Poster 3': `${import.meta.env.BASE_URL}posters/gare-poster-3.jpg`,
+  'circuito': `${import.meta.env.BASE_URL}posters/circuito.png`,
 }
 
 const params = {
