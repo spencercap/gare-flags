@@ -49,7 +49,10 @@ const clothWidth = 1
 const clothHeight = 1
 const clothNumSegmentsX = 12
 const clothNumSegmentsY = 12
-const sphereRadius = 0.15
+// Box dimensions (width x height x depth)
+const boxWidth = 0.8
+const boxHeight = 0.4
+const boxDepth = 0.05
 
 let vertexPositionBuffer: any,
   vertexForceBuffer: any,
@@ -60,13 +63,14 @@ let springVertexIdBuffer: any,
 let springListBuffer: any
 let computeSpringForces: any, computeVertexForces: any
 let dampeningUniform: any,
-  spherePositionUniform: any,
+  boxPositionUniform: any,
   stiffnessUniform: any,
-  sphereUniform: any,
-  windUniform: any
+  boxUniform: any,
+  windUniform: any,
+  boxSizeUniform: any
 let vertexWireframeObject: THREE.Mesh,
   springWireframeObject: THREE.Line
-let clothMesh: THREE.Mesh, clothMaterial: any, sphere: THREE.Mesh
+let clothMesh: THREE.Mesh, clothMaterial: any, box: THREE.Mesh
 let timeSinceLastStep = 0
 let timestamp = 0
 const verletVertices: any[] = []
@@ -75,7 +79,8 @@ const verletVertexColumns: any[] = []
 
 const params = {
   wireframe: false,
-  sphere: true,
+  boxEnabled: true, // Controls physics collision
+  boxVisible: true, // Controls mesh visibility
   wind: 1.0,
 }
 
@@ -181,9 +186,9 @@ async function init() {
   // ===== 📦 SETUP CLOTH SIMULATION =====
   setupCloth()
 
-  // ===== 🕹️ DRAG CONTROLS (after sphere is created) =====
+  // ===== 🕹️ DRAG CONTROLS (after box is created) =====
   {
-    dragControls = new DragControls([sphere], camera, renderer.domElement)
+    dragControls = new DragControls([box], camera, renderer.domElement)
     dragControls.addEventListener('hoveron', () => {
       cameraControls.enabled = false
     })
@@ -205,7 +210,7 @@ async function init() {
 
     // Cloth Physics Folder
     const physicsFolder = gui.addFolder('Cloth Physics')
-    physicsFolder.add(stiffnessUniform, 'value', 0.1, 1.5, 0.01).name('stiffness')
+    physicsFolder.add(stiffnessUniform, 'value', 0.1, 1.0, 0.01).name('stiffness')
     physicsFolder.add(params, 'wind', 0, 5, 0.1).name('wind force')
     physicsFolder.add(params, 'wireframe').name('show wireframe')
 
@@ -227,9 +232,13 @@ async function init() {
 
     // Controls Folder
     const controlsFolder = gui.addFolder('Controls')
-    controlsFolder.add(dragControls, 'enabled').name('drag sphere')
+    controlsFolder.add(dragControls, 'enabled').name('drag box')
     controlsFolder.add(cameraControls, 'autoRotate').name('auto rotate')
-    controlsFolder.add(params, 'sphere').name('show sphere')
+    
+    // Box Folder
+    const boxFolder = gui.addFolder('Box')
+    boxFolder.add(params, 'boxEnabled').name('enable collision')
+    boxFolder.add(params, 'boxVisible').name('show mesh')
 
     // Lights Folder
     const lightsFolder = gui.addFolder('Lights')
@@ -424,10 +433,11 @@ function setupVerletSpringBuffers() {
 
 function setupUniforms() {
   dampeningUniform = uniform(0.99)
-  spherePositionUniform = uniform(new THREE.Vector3(0, 0, 0))
-  sphereUniform = uniform(1.0)
+  boxPositionUniform = uniform(new THREE.Vector3(0, 0, 0))
+  boxUniform = uniform(1.0)
   windUniform = uniform(1.0)
   stiffnessUniform = uniform(0.2)
+  boxSizeUniform = uniform(new THREE.Vector3(boxWidth / 2, boxHeight / 2, boxDepth / 2))
 }
 
 /**
@@ -481,7 +491,7 @@ function setupComputeShaders() {
    * - Spring tensions from connected springs
    * - Gravity (constant downward force)
    * - Wind (using 3D noise for realistic turbulence)
-   * - Sphere collision (repulsion when vertex gets too close to sphere)
+   * - Box collision (repulsion when vertex penetrates the box)
    */
   computeVertexForces = Fn(() => {
     // Early exit for indices beyond vertex count
@@ -529,17 +539,37 @@ function setupComputeShaders() {
     const windForce = noise.mul(windUniform)
     force.z.subAssign(windForce)
 
-    // Handle collision with sphere
-    // If vertex would penetrate sphere, apply repulsion force
-    const deltaSphere = position.add(force).sub(spherePositionUniform)
-    const dist = deltaSphere.length()
-    const sphereForce = float(sphereRadius)
-      .sub(dist)
-      .max(0) // Only apply force if penetrating
-      .mul(deltaSphere)
-      .div(dist)
-      .mul(sphereUniform)
-    force.addAssign(sphereForce)
+    // Handle collision with box - smooth approach similar to sphere
+    const nextPosition = position.add(force)
+    const deltaBox = nextPosition.sub(boxPositionUniform)
+    const halfSize = boxSizeUniform
+    
+    // Clamp to find closest point on box surface
+    const closestX = deltaBox.x.clamp(halfSize.x.negate(), halfSize.x)
+    const closestY = deltaBox.y.clamp(halfSize.y.negate(), halfSize.y)
+    const closestZ = deltaBox.z.clamp(halfSize.z.negate(), halfSize.z)
+    
+    // Vector from closest point to vertex
+    const diffX = deltaBox.x.sub(closestX)
+    const diffY = deltaBox.y.sub(closestY)
+    const diffZ = deltaBox.z.sub(closestZ)
+    
+    // Distance from vertex to closest point on box
+    const distSq = diffX.mul(diffX).add(diffY.mul(diffY)).add(diffZ.mul(diffZ))
+    const dist = distSq.sqrt().max(0.0001)
+    
+    // Smooth repulsion force (similar to sphere collision)
+    // Force increases as vertex gets closer to box
+    const repulsionRadius = float(0.3) // Repulsion starts this distance from box surface
+    const penetration = repulsionRadius.sub(dist).max(0)
+    
+    const boxForceDir = float(0).toVar()
+    boxForceDir.x = diffX.div(dist)
+    boxForceDir.y = diffY.div(dist)
+    boxForceDir.z = diffZ.div(dist)
+    
+    const boxForce = boxForceDir.mul(penetration).mul(0.001).mul(boxUniform)
+    force.addAssign(boxForce)
 
     // Update the force and position buffers
     vertexForceBuffer.element(instanceIndex).assign(force)
@@ -598,11 +628,11 @@ function setupWireframe() {
   scene.add(springWireframeObject)
 }
 
-function setupSphere() {
-  const geometry = new THREE.IcosahedronGeometry(sphereRadius * 0.95, 4)
+function setupBox() {
+  const geometry = new THREE.BoxGeometry(boxWidth, boxHeight, boxDepth)
   const material = new THREE.MeshStandardNodeMaterial()
-  sphere = new THREE.Mesh(geometry, material)
-  scene.add(sphere)
+  box = new THREE.Mesh(geometry, material)
+  scene.add(box)
 }
 
 function setupClothMesh() {
@@ -703,7 +733,7 @@ function setupCloth() {
   setupUniforms()
   setupComputeShaders()
   setupWireframe()
-  setupSphere()
+  setupBox()
   setupClothMesh()
 }
 
@@ -713,17 +743,17 @@ function onWindowResize() {
   renderer.setSize(window.innerWidth, window.innerHeight)
 }
 
-function updateSphere() {
-  sphere.position.set(Math.sin(timestamp * 2.1) * 0.1, 0, Math.sin(timestamp * 0.8))
-  spherePositionUniform.value.copy(sphere.position)
+function updateBox() {
+  box.position.set(Math.sin(timestamp * 2.1) * 0.1, 0, Math.sin(timestamp * 0.8))
+  boxPositionUniform.value.copy(box.position)
 }
 
 async function render() {
   stats.begin()
 
-  // Update visibility based on GUI parameters
-  sphere.visible = params.sphere
-  sphereUniform.value = params.sphere ? 1 : 0
+  // Update visibility and physics based on GUI parameters
+  box.visible = params.boxVisible // Controls mesh visibility
+  boxUniform.value = params.boxEnabled ? 1 : 0 // Controls collision physics
   windUniform.value = params.wind
   clothMesh.visible = !params.wireframe
   vertexWireframeObject.visible = params.wireframe
@@ -750,7 +780,7 @@ async function render() {
     // run a verlet system simulation step
     timestamp += timePerStep
     timeSinceLastStep -= timePerStep
-    updateSphere()
+    updateBox()
     renderer.compute(computeSpringForces)
     renderer.compute(computeVertexForces)
   }
