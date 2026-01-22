@@ -67,10 +67,12 @@ let dampeningUniform: any,
   stiffnessUniform: any,
   boxUniform: any,
   windUniform: any,
-  boxSizeUniform: any
+  boxSizeUniform: any,
+  anchorPositionUniform: any,
+  gravityUniform: any
 let vertexWireframeObject: THREE.Mesh,
   springWireframeObject: THREE.Line
-let clothMesh: THREE.Mesh, clothMaterial: any, box: THREE.Mesh
+let clothMesh: THREE.Mesh, clothMaterial: any, box: THREE.Mesh, anchorBox: THREE.Mesh
 let timeSinceLastStep = 0
 let timestamp = 0
 const verletVertices: any[] = []
@@ -82,6 +84,9 @@ const params = {
   boxEnabled: true, // Controls physics collision
   boxVisible: true, // Controls mesh visibility
   wind: 1.0,
+  anchorZ: 0, // Z position of the anchor box
+  dampening: 0.95, // Energy loss per frame (lower = more damped/heavy feeling)
+  gravity: 0.0002, // Gravity strength (higher = heavier cloth)
 }
 
 const API = {
@@ -211,7 +216,14 @@ async function init() {
     // Cloth Physics Folder
     const physicsFolder = gui.addFolder('Cloth Physics')
     physicsFolder.add(stiffnessUniform, 'value', 0.1, 1.0, 0.01).name('stiffness')
+    physicsFolder.add(params, 'dampening', 0.9, 0.99, 0.001).name('dampening').onChange(() => {
+      // Lower dampening = more energy loss = heavier, slower cloth
+    })
+    physicsFolder.add(params, 'gravity', 0.00001, 0.001, 0.00001).name('gravity').onChange(() => {
+      // Higher gravity = heavier cloth
+    })
     physicsFolder.add(params, 'wind', 0, 5, 0.1).name('wind force')
+    physicsFolder.add(params, 'anchorZ', -2, 2, 0.01).name('anchor Z position')
     physicsFolder.add(params, 'wireframe').name('show wireframe')
 
     // Cloth Material Folder
@@ -324,8 +336,8 @@ function setupVerletGeometry() {
       // Calculate position in 3D space
       const posX = x * (clothWidth / clothNumSegmentsX) - clothWidth * 0.5
       const posZ = y * (clothHeight / clothNumSegmentsY)
-      // Fix every 5th vertex along the top edge to simulate hanging cloth
-      const isFixed = y === 0 && x % 5 === 0
+      // Fix all vertices along the top edge - they'll be attached to the anchor box
+      const isFixed = y === 0
       const vertex = addVerletVertex(posX, clothHeight * 0.5, posZ, isFixed)
       column.push(vertex)
     }
@@ -432,12 +444,14 @@ function setupVerletSpringBuffers() {
 }
 
 function setupUniforms() {
-  dampeningUniform = uniform(0.99)
+  dampeningUniform = uniform(params.dampening)
   boxPositionUniform = uniform(new THREE.Vector3(0, 0, 0))
   boxUniform = uniform(1.0)
   windUniform = uniform(1.0)
   stiffnessUniform = uniform(0.2)
   boxSizeUniform = uniform(new THREE.Vector3(boxWidth / 2, boxHeight / 2, boxDepth / 2))
+  anchorPositionUniform = uniform(new THREE.Vector3(0, clothHeight * 0.5, 0))
+  gravityUniform = uniform(params.gravity)
 }
 
 /**
@@ -505,8 +519,14 @@ function setupComputeShaders() {
     const springCount = params.y // Number of springs connected to this vertex
     const springPointer = params.z // Index into spring list
 
-    // Skip physics for fixed vertices (like the top edge anchors)
+    // For fixed vertices (top edge), update position to follow anchor box
     If(isFixed, () => {
+      const currentPos = vertexPositionBuffer.element(instanceIndex).toVar()
+      // Keep the X position relative to anchor, update Y and Z to match anchor
+      const newPos = currentPos.toVar()
+      newPos.y = anchorPositionUniform.y
+      newPos.z = anchorPositionUniform.z
+      vertexPositionBuffer.element(instanceIndex).assign(newPos)
       Return()
     })
 
@@ -531,8 +551,8 @@ function setupComputeShaders() {
       force.addAssign(springForce.mul(factor))
     })
 
-    // Add gravity (constant downward force)
-    force.y.subAssign(0.00005)
+    // Add gravity (downward force controlled by gravity uniform)
+    force.y.subAssign(gravityUniform)
 
     // Add wind force using 3D Perlin noise for realistic turbulence
     const noise = triNoise3D(position, 1, time).sub(0.2).mul(0.0001)
@@ -635,6 +655,21 @@ function setupBox() {
   scene.add(box)
 }
 
+function setupAnchorBox() {
+  // Create the anchor box that the cloth will be attached to
+  const geometry = new THREE.BoxGeometry(clothWidth, 0.1, 0.2)
+  const material = new THREE.MeshStandardNodeMaterial({
+    color: 0x808080,
+    metalness: 0.5,
+    roughness: 0.5,
+  })
+  anchorBox = new THREE.Mesh(geometry, material)
+  anchorBox.position.set(0, clothHeight * 0.5, params.anchorZ)
+  anchorBox.castShadow = true
+  anchorBox.receiveShadow = true
+  scene.add(anchorBox)
+}
+
 function setupClothMesh() {
   // This function generates a three Geometry and Mesh to render the cloth based on the verlet systems position data.
   // Therefore it creates a plane mesh, in which each vertex will be centered in the center of 4 verlet vertices.
@@ -734,6 +769,7 @@ function setupCloth() {
   setupComputeShaders()
   setupWireframe()
   setupBox()
+  setupAnchorBox()
   setupClothMesh()
 }
 
@@ -748,6 +784,14 @@ function updateBox() {
   boxPositionUniform.value.copy(box.position)
 }
 
+function updateAnchorBox() {
+  // Update anchor box position based on GUI parameter
+  anchorBox.position.z = params.anchorZ
+  
+  // Update the uniform that the compute shader uses to position fixed vertices
+  anchorPositionUniform.value.set(0, clothHeight * 0.5, params.anchorZ)
+}
+
 async function render() {
   stats.begin()
 
@@ -755,6 +799,8 @@ async function render() {
   box.visible = params.boxVisible // Controls mesh visibility
   boxUniform.value = params.boxEnabled ? 1 : 0 // Controls collision physics
   windUniform.value = params.wind
+  dampeningUniform.value = params.dampening
+  gravityUniform.value = params.gravity
   clothMesh.visible = !params.wireframe
   vertexWireframeObject.visible = params.wireframe
   springWireframeObject.visible = params.wireframe
@@ -781,6 +827,7 @@ async function render() {
     timestamp += timePerStep
     timeSinceLastStep -= timePerStep
     updateBox()
+    updateAnchorBox()
     renderer.compute(computeSpringForces)
     renderer.compute(computeVertexForces)
   }
